@@ -19,6 +19,16 @@ const { parseFitInput, attachFit } = require('./fitCheck');
  *     短边翻转：绕垂直短边翻转，(x, y) -> (W - x, y)，左右页位互换，内容方向不变。
  * - 成品页数不足整帖时，在末尾自动补空白页。
  *
+ * 均衡分帖（balanced，可选）：
+ * - 默认（关闭）为固定分帖：每帖均为「每帖张数」张，末帖不足部分补空白页。
+ * - 启用后仍以每帖张数为上限，把整本所需纸张（ceil(成品页数 / 4) 张）在最少帖数
+ *   （ceil(所需纸张 / 每帖张数上限)，与固定分帖帖数一致）之间均匀分配：
+ *   各帖实际张数差不超过 1，较大的帖排在前面，因此空白页只出现在末帖末尾。
+ * - 每帖按自身页数（实际张数 × 4）连续编号并计算正反页位；
+ *   爬移补偿同样按该帖实际层数从 i = 0 起算（每帖返回自己的 sheetCompensationMm）。
+ * - 每帖返回 actualSheetCount / pageCount / sheetCompensationMm；
+ *   顶层 balance 汇总整本纸张数与相对固定分帖节省的空白页数（savedBlankPages）。
+ *
  * 爬移补偿（creep compensation）：
  * - 内帖书背处向外隆起，内层纸页裁切后会比外层短，需要把内层页位向外侧平移补偿。
  * - 每帖第 i 张纸（由外向内，i 从 0 起）的补偿量：
@@ -71,6 +81,7 @@ function makeSlot(page, totalPages) {
  * @param {number} input.sheetsPerSignature 每帖张数（≥1 的整数）
  * @param {string} input.binding            装订方式：'left' | 'right'
  * @param {string} input.flip               双面翻转方式：'long' | 'short'
+ * @param {boolean} [input.balanced]        均衡分帖：true 时在最少帖数间均匀分配纸张（缺省 false = 固定分帖）
  * @param {number} [input.paperThickness]   纸张厚度（mm，≥0，缺省 0 = 不做爬移补偿）
  * @param {number} [input.maxCompensation]  爬移最大补偿量（mm，≥0，缺省 0 = 不做爬移补偿）
  * @param {number} [input.paperWidth]       纸张宽（mm，>0 启用适配检查；四项尺寸全缺省则不检查）
@@ -86,6 +97,8 @@ function computeImposition(input) {
   const sheetsPerSignature = toInteger(input && input.sheetsPerSignature);
   const binding = input && input.binding;
   const flip = input && input.flip;
+  // 均衡分帖开关：仅接受严格的 true，其余（缺省 / false / 其他类型）一律按固定分帖处理
+  const balanced = Boolean(input && input.balanced === true);
   const paperThickness = toNonNegativeMm(input && input.paperThickness);
   const maxCompensation = toNonNegativeMm(input && input.maxCompensation);
   const fit = parseFitInput(input || {});
@@ -110,8 +123,32 @@ function computeImposition(input) {
   }
 
   const pagesPerSignature = sheetsPerSignature * 4;
-  const signatureCount = Math.ceil(totalPages / pagesPerSignature);
-  const paddedPages = signatureCount * pagesPerSignature;
+
+  // 每帖实际张数序列：
+  // - 固定分帖（默认）：每帖均为 sheetsPerSignature 张，末帖不足部分补空白页；
+  // - 均衡分帖：整本所需纸张 = ceil(totalPages / 4) 张，在最少帖数
+  //   （ceil(所需纸张 / 每帖张数上限)，与固定分帖帖数一致）之间均匀分配，
+  //   各帖张数差 ≤ 1 且较大的帖在前，故空白页只出现在末帖末尾。
+  let signatureSheetCounts;
+  if (balanced) {
+    const totalSheetsNeeded = Math.ceil(totalPages / 4);
+    const minSignatures = Math.ceil(totalSheetsNeeded / sheetsPerSignature);
+    const baseCount = Math.floor(totalSheetsNeeded / minSignatures);
+    const remainder = totalSheetsNeeded % minSignatures;
+    signatureSheetCounts = [];
+    for (let s = 0; s < minSignatures; s++) {
+      signatureSheetCounts.push(baseCount + (s < remainder ? 1 : 0));
+    }
+  } else {
+    const fixedSignatureCount = Math.ceil(totalPages / pagesPerSignature);
+    signatureSheetCounts = new Array(fixedSignatureCount).fill(sheetsPerSignature);
+  }
+  const signatureCount = signatureSheetCounts.length;
+  const totalSheets = signatureSheetCounts.reduce((sum, n) => sum + n, 0);
+  const paddedPages = totalSheets * 4;
+  const blankPages = paddedPages - totalPages;
+  // 固定分帖（每帖均为上限张数）会产生的空白页数，用于汇总均衡分帖节省的空白页
+  const fixedBlankPages = Math.ceil(totalPages / pagesPerSignature) * pagesPerSignature - totalPages;
 
   // 爬移补偿：每帖独立从最外层（i=0）起算，故各帖同序号纸张的补偿量相同。
   // 任一参数为 0 时补偿量恒为 0，拼版页位与原结果完全一致。
@@ -125,12 +162,18 @@ function computeImposition(input) {
   const sideSign = binding === 'left' ? 1 : -1;
 
   const signatures = [];
+  let pageCursor = 1;
   for (let s = 0; s < signatureCount; s++) {
-    const start = s * pagesPerSignature + 1;
-    const end = start + pagesPerSignature - 1;
+    const actualSheetCount = signatureSheetCounts[s];
+    // 每帖按自身页数（实际张数 × 4）连续编号
+    const start = pageCursor;
+    const end = start + actualSheetCount * 4 - 1;
+    pageCursor = end + 1;
+    // 爬移补偿按该帖实际层数从 i = 0 起算（完整序列的前 actualSheetCount 项）
+    const sigSheetCompensationMm = sheetCompensationMm.slice(0, actualSheetCount);
     const sheets = [];
 
-    for (let i = 0; i < sheetsPerSignature; i++) {
+    for (let i = 0; i < actualSheetCount; i++) {
       const lowFront = start + 2 * i; // 小号页（正面）
       const lowBack = lowFront + 1;   // 小号页之背
       const highFront = end - 2 * i;  // 大号页（正面）
@@ -173,13 +216,22 @@ function computeImposition(input) {
       sheets.push({ index: i + 1, front, back });
     }
 
-    signatures.push({ index: s + 1, pageStart: start, pageEnd: end, sheets });
+    signatures.push({
+      index: s + 1,
+      pageStart: start,
+      pageEnd: end,
+      actualSheetCount,
+      pageCount: actualSheetCount * 4,
+      // 该帖由外向内每张纸的爬移补偿量（mm），按实际层数计算
+      sheetCompensationMm: sigSheetCompensationMm,
+      sheets,
+    });
   }
 
   const result = {
     meta: {
       app: 'saddle-stitch-imposition',
-      version: '1.2.0',
+      version: '1.3.0',
       generatedAt: new Date().toISOString(),
     },
     input: {
@@ -187,6 +239,7 @@ function computeImposition(input) {
       sheetsPerSignature,
       binding,
       flip,
+      balanced,
       paperThickness,
       maxCompensation,
       paperWidth: fit.paperWidth,
@@ -199,12 +252,19 @@ function computeImposition(input) {
     pagesPerSignature,
     signatureCount,
     paddedPages,
-    blankPages: paddedPages - totalPages,
+    blankPages,
+    // 均衡分帖汇总：整本实际纸张数与相对固定分帖节省的空白页数（关闭时 savedBlankPages 为 0）
+    balance: {
+      enabled: balanced,
+      totalSheets,
+      fixedBlankPages,
+      savedBlankPages: fixedBlankPages - blankPages,
+    },
     creep: {
       paperThickness,
       maxCompensation,
       enabled: creepEnabled,
-      // 每帖由外向内第 i 张纸的补偿量（mm），各帖相同
+      // 按每帖张数上限由外向内第 i 张纸的补偿量（mm）；各帖实际序列见 signatures[].sheetCompensationMm
       sheetCompensationMm,
     },
     signatures,

@@ -242,7 +242,8 @@ test('任一参数为 0 时偏移全部归零', () => {
 });
 
 test('爬移参数不改变页码拼版结果（启用前后页码布局一致）', () => {
-  const strip = (r) => JSON.parse(JSON.stringify(r.signatures, (k, v) => (k === 'offsetMm' ? undefined : v)));
+  // offsetMm 与 sheetCompensationMm 均为爬移数据，比较页码布局时剔除
+  const strip = (r) => JSON.parse(JSON.stringify(r.signatures, (k, v) => (k === 'offsetMm' || k === 'sheetCompensationMm' ? undefined : v)));
   const without = computeImposition({ totalPages: 12, sheetsPerSignature: 3, binding: 'right', flip: 'long' });
   const withCreep = computeImposition({ totalPages: 12, sheetsPerSignature: 3, binding: 'right', flip: 'long', paperThickness: 0.12, maxCompensation: 0.3 });
   assert.deepEqual(strip(withCreep), strip(without));

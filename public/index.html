@@ -47,6 +47,10 @@
         <label for="maxCompensation">最大补偿量（mm）</label>
         <input id="maxCompensation" type="number" min="0" max="100" step="0.1" value="0">
       </div>
+      <div class="field field-checkbox">
+        <label for="balanced">均衡分帖</label>
+        <input id="balanced" type="checkbox">
+      </div>
       <div class="field">
         <label for="paperWidth">纸张宽（mm，可选）</label>
         <input id="paperWidth" type="number" min="0" max="3000" step="0.1" placeholder="如 440">
@@ -77,6 +81,8 @@
     </form>
     <p class="hint">
       每帖页数 = 每帖张数 × 4；总页数不足整帖时，自动在末尾补空白页。
+      勾选「均衡分帖」后，仍以每帖张数为上限，把整本所需纸张在最少帖数间均匀分配（各帖张数差 ≤ 1），
+      空白页只出现在末帖末尾，每帖按自身页数连续编号，爬移补偿按该帖实际层数重算；不勾选则为固定分帖（每帖均为每帖张数）。
       纸张厚度与最大补偿量任一为 0（或缺省）时不做爬移补偿；启用后第 i 张（由外向内 i 从 0 起）补偿量 = min(i × 纸张厚度 × 2, 最大补偿量) mm。
     </p>
     <p class="hint">

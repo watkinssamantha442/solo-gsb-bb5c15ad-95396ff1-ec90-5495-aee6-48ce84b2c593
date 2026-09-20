@@ -65,6 +65,20 @@ select {
   color: #16233b;
 }
 
+.field-checkbox {
+  justify-content: flex-end;
+  padding-bottom: 2px;
+}
+
+.field-checkbox input[type="checkbox"] {
+  min-width: auto;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  accent-color: #2563eb;
+  cursor: pointer;
+}
+
 button {
   padding: 9px 18px;
   border: none;
@@ -140,6 +154,16 @@ button.ghost:disabled {
 }
 
 .summary .chip.creep-off {
+  background: #f1f4f9;
+  color: #8a94a6;
+}
+
+.summary .chip.balance {
+  background: #e6f7ec;
+  color: #1e7e34;
+}
+
+.summary .chip.balance-off {
   background: #f1f4f9;
   color: #8a94a6;
 }

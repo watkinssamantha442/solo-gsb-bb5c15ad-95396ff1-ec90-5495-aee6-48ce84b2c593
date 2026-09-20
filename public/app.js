@@ -37,6 +37,7 @@ form.addEventListener('submit', async (event) => {
     sheetsPerSignature: Number(document.getElementById('sheetsPerSignature').value),
     binding: document.getElementById('binding').value,
     flip: document.getElementById('flip').value,
+    balanced: document.getElementById('balanced').checked,
     paperThickness: Number(document.getElementById('paperThickness').value),
     maxCompensation: Number(document.getElementById('maxCompensation').value),
     paperWidth: Number(document.getElementById('paperWidth').value),
@@ -117,12 +118,16 @@ function renderAll() {
 
 function renderSummary() {
   const r = state.result;
+  const balancedOn = r.balance && r.balance.enabled;
   const chips = [
     { text: `成品 ${r.input.totalPages} 页` },
-    { text: `每帖 ${r.input.sheetsPerSignature} 张（${r.pagesPerSignature} 页）` },
-    { text: `共 ${r.signatureCount} 帖` },
+    { text: `每帖至多 ${r.input.sheetsPerSignature} 张（${r.pagesPerSignature} 页）` },
+    { text: `共 ${r.signatureCount} 帖 · ${r.balance.totalSheets} 张` },
     { text: `补白后 ${r.paddedPages} 页` },
     { text: r.blankPages > 0 ? `自动补空白页 ${r.blankPages} 页` : '无需补白', cls: r.blankPages > 0 ? 'warn' : '' },
+    balancedOn
+      ? { text: `均衡分帖：较固定分帖节省空白页 ${r.balance.savedBlankPages} 页`, cls: 'balance' }
+      : { text: '固定分帖', cls: 'balance-off' },
     { text: BINDING_TEXT[r.input.binding] },
     { text: FLIP_TEXT[r.input.flip] },
     r.creep.enabled
@@ -185,6 +190,7 @@ function renderTable() {
   const r = state.result;
   const creepOn = r.creep.enabled;
   const fitOn = r.fit && r.fit.enabled;
+  const balancedOn = r.balance && r.balance.enabled;
   const flipNote = r.input.flip === 'long'
     ? '背面：左右页位不变，内容旋转 180°'
     : '背面：左右页位互换';
@@ -193,13 +199,15 @@ function renderTable() {
     : '爬移补偿未启用，offsetMm 均为 0';
   tableBody.innerHTML = '';
   r.signatures.forEach((sig) => {
+    // 均衡分帖下各帖张数不同，在「帖」列标注该帖实际张数
+    const sigLabel = balancedOn ? `${sig.index}（${sig.actualSheetCount} 张）` : String(sig.index);
     sig.sheets.forEach((sheet) => {
       [
         { name: '正面', side: sheet.front, note: '正面' },
         { name: '背面', side: sheet.back, note: flipNote },
       ].forEach(({ name, side, note }) => {
         const tr = document.createElement('tr');
-        [String(sig.index), String(sheet.index), name].forEach((t) => {
+        [sigLabel, String(sheet.index), name].forEach((t) => {
           const td = document.createElement('td');
           td.textContent = t;
           tr.appendChild(td);
@@ -269,6 +277,9 @@ function draw() {
   const sheet = sig.sheets[pos.shi];
   const { flip, binding } = r.input;
   const fitOn = r.fit && r.fit.enabled;
+  const balancedOn = r.balance && r.balance.enabled;
+  // 本帖爬移补偿序列（均衡分帖下各帖按实际层数重算，长度可能不同）
+  const sigCreepMm = sig.sheetCompensationMm || r.creep.sheetCompensationMm;
 
   // 当前张全部超限原因（用于底部说明，并据此加高画布）
   const violations = [];
@@ -287,7 +298,7 @@ function draw() {
       });
     });
   }
-  const noteLines = buildNotes(r.input, r.creep, fitOn ? r.fit : null, violations);
+  const noteLines = buildNotes(r.input, r.creep, fitOn ? r.fit : null, violations, r.balance);
   const canvasH = Math.max(CANVAS_H, 540 + noteLines.length * 25 + 16);
   const ctx = setupCanvas(canvasH);
 
@@ -306,11 +317,14 @@ function draw() {
   );
   ctx.font = '14px system-ui, sans-serif';
   ctx.fillStyle = '#5a6b85';
+  const balanceSubtitle = balancedOn
+    ? `　均衡分帖：本帖 ${sig.actualSheetCount} 张 · 较固定分帖节省空白页 ${r.balance.savedBlankPages} 页`
+    : '';
   const creepSubtitle = r.creep.enabled
-    ? `　爬移补偿：纸厚 ${formatMm(r.input.paperThickness)} mm · 上限 ${formatMm(r.input.maxCompensation)} mm · 本张补偿 ${formatMm(r.creep.sheetCompensationMm[sheet.index - 1])} mm`
+    ? `　爬移补偿：纸厚 ${formatMm(r.input.paperThickness)} mm · 上限 ${formatMm(r.input.maxCompensation)} mm · 本张补偿 ${formatMm(sigCreepMm[sheet.index - 1])} mm`
     : '　爬移补偿未启用';
   ctx.fillText(
-    `装订：${BINDING_TEXT[binding]}　双面翻转：${FLIP_TEXT[flip]}　成品 ${r.input.totalPages} 页 · 补白 ${r.blankPages} 页 · 共 ${r.paddedPages} 页${creepSubtitle}`,
+    `装订：${BINDING_TEXT[binding]}　双面翻转：${FLIP_TEXT[flip]}　成品 ${r.input.totalPages} 页 · 补白 ${r.blankPages} 页 · 共 ${r.paddedPages} 页${balanceSubtitle}${creepSubtitle}`,
     40, 70
   );
   if (fitOn) {
@@ -347,7 +361,7 @@ function draw() {
   );
 
   // 爬移像素比例：示意性放大，保证最大补偿量在页位内至少留 18px 边距且不超过页位宽 35%
-  const maxCreepMm = r.creep.enabled ? Math.max(...r.creep.sheetCompensationMm) : 0;
+  const maxCreepMm = r.creep.enabled ? Math.max(...sigCreepMm) : 0;
   const creepPxPerMm = maxCreepMm > 0
     ? Math.max(1, Math.min(30, (sheetW / 2 * 0.35 - 18) / maxCreepMm))
     : 0;
@@ -691,7 +705,7 @@ function drawFlipDiagram(ctx, zone, flip) {
 }
 
 /** 组装底部图例与规则说明行（含适配检查结果）。 */
-function buildNotes(input, creep, fit, violations) {
+function buildNotes(input, creep, fit, violations, balance) {
   const lines = [
     { text: '图例：蓝色数字 = 成品页码；灰色斜纹 = 自动补齐的空白页；红色虚线 = 对折线（订口）；灰色小角线 = 裁切标记。' },
     {
@@ -706,6 +720,12 @@ function buildNotes(input, creep, fit, violations) {
     },
     { text: '背面每个页位标注了它物理上位于哪一正面页之背；沿折线对折并配帖装订后，页码首尾相接，阅读顺序连续。' },
   ];
+  if (balance && balance.enabled) {
+    lines.push({
+      text: `均衡分帖：整本 ${balance.totalSheets} 张纸按每帖至多 ${input.sheetsPerSignature} 张均匀分配（各帖张数差 ≤ 1），空白页只出现在末帖末尾，较固定分帖（${balance.fixedBlankPages} 页空白）节省空白页 ${balance.savedBlankPages} 页；每帖按自身页数连续编号，爬移补偿按该帖实际层数重算。`,
+      color: '#1e7e34',
+    });
+  }
   if (creep && creep.enabled) {
     lines.push(
       {
