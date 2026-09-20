@@ -2,12 +2,14 @@
 
 基于 **Node.js + Express + 原生 Canvas** 的骑马钉（saddle-stitch）拼版预演 Web 应用。
 
-输入成品页数、每帖张数、装订方向与双面翻转方式后，系统会：
+输入成品页数、每帖张数上限、装订方向与双面翻转方式后，系统会：
 
 - 成品页数不足整帖时，**自动在末尾补空白页**；
-- **按帖拆分页码**（每帖页数 = 每帖张数 × 4），生成每张纸正、反面的左右页位；
+- **固定分帖（默认）**：每帖固定张数（每帖页数 = 每帖张数 × 4），末帖不足整体补白；
+- **均衡分帖（可选）**：仍以每帖张数为上限，先取最少帖数，再把整本所需纸张在各帖间均匀分配，**各帖实际张数差不超过 1**，各帖按自身页数连续编号，**空白页只出现在末帖末尾**；每帖返回 `actualSheetCount`，并汇总相对固定分帖 `savedBlankPages` 节省的空白页数；
+- **按帖拆分页码**，生成每张纸正、反面的左右页位；
 - 背面依据 **长边 / 短边翻转** 执行坐标变换，保证裁切折叠后的阅读顺序；
-- 可选 **爬移补偿（creep compensation）**：按纸张厚度由外向内平移内层页位，画布叠加原始页位虚线框与补偿后实线框，每个页位（含空白页）输出 `offsetMm`；
+- 可选 **爬移补偿（creep compensation）**：按纸张厚度由外向内平移内层页位，画布叠加原始页位虚线框与补偿后实线框，每个页位（含空白页）输出 `offsetMm`；均衡分帖下按**各帖实际层数**独立重算；
 - 可选 **纸张规格与出血 / 安全区适配检查**：输入纸张宽高、成品页宽高、出血与安全边距后，按每个正反页位的实际方向计算可用矩形，逐页位判定成品页是否放得下、出血是否落在纸张内、安全边距是否过大，并在逐张预览与清单中标出不合格页位；
 - 画布**逐张显示**纸面、页码、空白页位与翻转方向示意；
 - 一键**导出拼版清单 JSON**（包含适配检查结果）。
@@ -39,6 +41,21 @@ npm test           # 运行拼版逻辑单元测试
   - 长边翻转：绕水平长边翻转，`(x, y) → (x, H − y)`，背面左右页位不变，内容旋转 180°（页首朝下）；
   - 短边翻转：绕垂直短边翻转，`(x, y) → (W − x, y)`，背面左右页位互换，内容方向不变。
 - **阅读顺序校验**：画布上每个背面页位都标注了它物理上位于哪一正面页之背（页码首尾相接）。
+
+### 均衡分帖（balanced split）
+
+表单勾选「均衡分帖」（API 传 `balancedSplit: true`）后启用；不勾选 / 不传 / 传 `false` 时为**固定分帖**，结果与旧版本完全一致。
+
+规则（`N` = 成品页数，`S` = 每帖张数上限）：
+
+- 每帖容量仍为 `4S` 页，故**最少帖数** `k = ceil(N / 4S)`，与固定分帖的帖数相同；
+- 整本所需纸张 `T = ceil(N / 4)` 在 `k` 帖间均匀分配：每帖 `floor(T/k)` 或 `ceil(T/k)` 张，**各帖实际张数差不超过 1**（多出的帖依次靠前分配），且任何一帖都不超过上限 `S`；
+- 各帖按自身页数**连续编号**，页码范围首尾相接；空白页只补在末帖（页码最大的若干页位，即末帖外层高号页与其背面），**前面各帖均无空白页**；
+- 每帖返回 `actualSheetCount` / `actualPageCount` / `blankPages` 与该帖的 `sheetCompensationMm`；
+- 顶层汇总 `balanced`：`fixedPaddedPages`（固定分帖补白后页数）、`savedBlankPages = fixedPaddedPages − paddedPages`（相对固定分帖节省的空白页数）、`actualSheetCounts`（各帖实际张数）等；
+- 爬移补偿按**该帖实际层数**（实际张数）由外向内独立重算；顶层 `creep.sheetCompensationMm` 仍按每帖张数上限给出，各帖以自身的 `sheetCompensationMm` 为准。
+
+示例：17 页、每帖上限 2 张（8 页/帖）时，固定分帖为 `[8, 8, 8] = 24` 页、补 7 个空白页；均衡分帖为 `[2, 2, 1]` 张、`[8, 8, 4] = 20` 页，空白页仅 3 个且全部在末帖，`savedBlankPages = 4`。
 
 ### 爬移补偿（creep compensation）
 
@@ -80,6 +97,7 @@ npm test           # 运行拼版逻辑单元测试
 {
   "totalPages": 16,
   "sheetsPerSignature": 2,
+  "balancedSplit": false,
   "binding": "left",
   "flip": "short",
   "paperThickness": 0.1,
@@ -94,7 +112,8 @@ npm test           # 运行拼版逻辑单元测试
 ```
 
 - `totalPages`：成品页数，1 ~ 10000 的整数
-- `sheetsPerSignature`：每帖张数，1 ~ 100 的整数
+- `sheetsPerSignature`：每帖张数上限，1 ~ 100 的整数
+- `balancedSplit`：**可选**，`true` 启用均衡分帖（在最少帖数间均匀分配纸张，各帖实际张数差 ≤ 1，空白页只留在末帖末尾）；缺省 / `false` 为固定分帖（向后兼容）
 - `binding`：`left`（左装订）或 `right`（右装订）
 - `flip`：`long`（长边翻转）或 `short`（短边翻转）
 - `paperThickness`：**可选**，纸张厚度（mm，≥ 0，缺省为 0）
@@ -104,13 +123,32 @@ npm test           # 运行拼版逻辑单元测试
 
 后两个爬移参数任一为 0（或不传）时不做爬移补偿，所有页位 `offsetMm` 为 0，旧调用方无需改动。
 
-响应（节选）：完整拼版清单，与前端导出的 JSON 一致。`creep.sheetCompensationMm` 按帖由外向内给出每张纸的补偿量；每个页位对象（含空白页）都带 `offsetMm`；启用适配检查时每个页位另带 `fit`，顶层 `fit` 给出整体汇总。
+响应（节选）：完整拼版清单，与前端导出的 JSON 一致。`creep.sheetCompensationMm` 按每帖张数上限由外向内给出补偿量；**每个帖对象另带 `actualSheetCount`（实际张数）、`actualPageCount`（实际页数）、`blankPages`（本帖空白页数）与按该帖实际层数重算的 `sheetCompensationMm`**；每个页位对象（含空白页）都带 `offsetMm`；启用适配检查时每个页位另带 `fit`，顶层 `fit` 给出整体汇总。
+
+顶层 `balanced` 汇总分帖模式：
+
+- 固定分帖（`balancedSplit` 缺省 / `false`）：`{ "enabled": false }`；
+- 均衡分帖：
+
+```json
+{
+  "enabled": true,
+  "maxSheetsPerSignature": 2,
+  "totalSheets": 5,
+  "fixedSignatureCount": 3,
+  "fixedPaddedPages": 24,
+  "fixedBlankPages": 7,
+  "savedBlankPages": 4,
+  "actualSheetCounts": [2, 2, 1]
+}
+```
 
 ```json
 {
   "input": {
     "totalPages": 8,
     "sheetsPerSignature": 2,
+    "balancedSplit": false,
     "binding": "left",
     "flip": "short",
     "paperThickness": 0.1,
@@ -120,6 +158,7 @@ npm test           # 运行拼版逻辑单元测试
   "signatureCount": 1,
   "paddedPages": 8,
   "blankPages": 0,
+  "balanced": { "enabled": false },
   "creep": {
     "paperThickness": 0.1,
     "maxCompensation": 0.15,
@@ -131,6 +170,10 @@ npm test           # 运行拼版逻辑单元测试
       "index": 1,
       "pageStart": 1,
       "pageEnd": 8,
+      "actualSheetCount": 2,
+      "actualPageCount": 8,
+      "blankPages": 0,
+      "sheetCompensationMm": [0, 0.15],
       "sheets": [
         {
           "index": 1,
@@ -179,13 +222,13 @@ npm test           # 运行拼版逻辑单元测试
 
 顶层 `fit` 汇总：`{ enabled, paperWidth, paperHeight, pageWidth, pageHeight, bleedMm, safetyMm, slotWidth, slotHeight, ok, totalSlots, failCount }`；未启用时仅为 `{ "enabled": false }`。
 
-参数非法时返回 `400` 与错误信息（含纸张厚度 / 最大补偿量为负，尺寸参数为负、非数字或只提供部分尺寸等情况）。另提供 `GET /api/health` 健康检查。
+参数非法时返回 `400` 与错误信息（含纸张厚度 / 最大补偿量为负，尺寸参数为负、非数字或只提供部分尺寸，`balancedSplit` 非布尔值等情况）。另提供 `GET /api/health` 健康检查。
 
 ## 目录结构
 
 ```
 ├── server.js            # Express 服务：静态页面 + /api/impose
-├── src/imposition.js    # 拼版计算核心（按帖拆分、正反面页位、翻转坐标变换、爬移补偿 offsetMm）
+├── src/imposition.js    # 拼版计算核心（固定 / 均衡分帖、正反面页位、翻转坐标变换、爬移补偿 offsetMm）
 ├── src/fitCheck.js      # 纸张规格与出血 / 安全区适配检查（可用矩形、trim/bleed/safe、超限原因）
 ├── public/              # 前端（原生 Canvas 逐张绘制、原始/补偿页位叠加、适配标记、JSON 导出）
 │   ├── index.html

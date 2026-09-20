@@ -65,6 +65,25 @@ select {
   color: #16233b;
 }
 
+.field.checkbox-field {
+  flex: 1 1 100%;
+}
+
+.field.checkbox-field label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  color: #16233b;
+  cursor: pointer;
+}
+
+.field.checkbox-field input {
+  min-width: 0;
+  width: auto;
+  margin: 0;
+}
+
 button {
   padding: 9px 18px;
   border: none;
@@ -152,6 +171,17 @@ button.ghost:disabled {
 .summary .chip.fit-fail {
   background: #ffe3e3;
   color: #c92a2a;
+}
+
+.summary .chip.balanced {
+  background: #e3f6f8;
+  color: #0b7285;
+}
+
+.summary .chip.saved {
+  background: #e6f7ec;
+  color: #1e7e34;
+  font-weight: 600;
 }
 
 .slot-fit {

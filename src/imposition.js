@@ -19,6 +19,15 @@ const { parseFitInput, attachFit } = require('./fitCheck');
  *     短边翻转：绕垂直短边翻转，(x, y) -> (W - x, y)，左右页位互换，内容方向不变。
  * - 成品页数不足整帖时，在末尾自动补空白页。
  *
+ * 分帖模式：
+ * - 固定分帖（balancedSplit 缺省 / false，默认）：每帖固定 sheetsPerSignature 张，
+ *   末帖不足部分整体补白。
+ * - 均衡分帖（balancedSplit = true）：仍以每帖张数为上限，先按上限求出最少帖数，
+ *   再把整本所需纸张 ceil(总页数 / 4) 在这些帖间均匀分配，各帖实际张数差不超过 1；
+ *   各帖按自身页数连续编号，空白页只会出现在末帖末尾（页码最大的若干页位）。
+ *   每帖返回 actualSheetCount；顶层 balanced.savedBlankPages 给出相对固定分帖
+ *   少补的空白页数；爬移补偿按各帖实际层数（实际张数）独立重算。
+ *
  * 爬移补偿（creep compensation）：
  * - 内帖书背处向外隆起，内层纸页裁切后会比外层短，需要把内层页位向外侧平移补偿。
  * - 每帖第 i 张纸（由外向内，i 从 0 起）的补偿量：
@@ -79,6 +88,7 @@ function makeSlot(page, totalPages) {
  * @param {number} [input.pageHeight]       成品页高（mm）
  * @param {number} [input.bleedMm]          出血（mm，≥0，缺省 0）
  * @param {number} [input.safetyMm]         安全边距（mm，≥0，缺省 0）
+ * @param {boolean} [input.balancedSplit]   是否启用均衡分帖（缺省 false = 固定每帖张数）
  * @returns {object} 拼版结果（按帖 -> 张 -> 正/背面 -> 左/右页位；启用适配检查时每个页位带 fit）
  */
 function computeImposition(input) {
@@ -88,6 +98,7 @@ function computeImposition(input) {
   const flip = input && input.flip;
   const paperThickness = toNonNegativeMm(input && input.paperThickness);
   const maxCompensation = toNonNegativeMm(input && input.maxCompensation);
+  const balancedSplit = input && input.balancedSplit === true;
   const fit = parseFitInput(input || {});
 
   if (!Number.isInteger(totalPages) || totalPages < 1 || totalPages > MAX_TOTAL_PAGES) {
@@ -108,29 +119,61 @@ function computeImposition(input) {
   if (Number.isNaN(maxCompensation)) {
     throw new Error('最大补偿量必须为 ≥ 0 的数字（单位 mm）');
   }
+  if (input && input.balancedSplit !== undefined && typeof input.balancedSplit !== 'boolean') {
+    throw new Error('均衡分帖开关必须为布尔值（true / false）');
+  }
 
-  const pagesPerSignature = sheetsPerSignature * 4;
-  const signatureCount = Math.ceil(totalPages / pagesPerSignature);
-  const paddedPages = signatureCount * pagesPerSignature;
+  const maxPagesPerSignature = sheetsPerSignature * 4;
 
-  // 爬移补偿：每帖独立从最外层（i=0）起算，故各帖同序号纸张的补偿量相同。
+  // 固定分帖：每帖固定 sheetsPerSignature 张，末帖整体补白。
+  // 均衡分帖：以每帖张数为上限取最少帖数，整本所需纸张在各帖间均匀分配，
+  // 各帖实际张数 = base 或 base + 1（多出的 remainder 帖依次靠前分配），差不超过 1。
+  const fixedSignatureCount = Math.ceil(totalPages / maxPagesPerSignature);
+  const fixedPaddedPages = fixedSignatureCount * maxPagesPerSignature;
+
+  // 均衡分帖下最少帖数与固定分帖相同（每帖容量仍为 maxPagesPerSignature）。
+  const signatureCount = fixedSignatureCount;
+  let sheetCounts;
+  if (balancedSplit) {
+    const totalSheetsNeeded = Math.ceil(totalPages / 4);
+    const base = Math.floor(totalSheetsNeeded / signatureCount);
+    const remainder = totalSheetsNeeded - base * signatureCount;
+    sheetCounts = Array.from({ length: signatureCount }, (_, s) => base + (s < remainder ? 1 : 0));
+  } else {
+    sheetCounts = Array.from({ length: signatureCount }, () => sheetsPerSignature);
+  }
+
+  const paddedPages = sheetCounts.reduce((sum, n) => sum + n * 4, 0);
+
+  // 爬移补偿：每帖独立从最外层（i=0）起算，按该帖实际层数（实际张数）给出补偿量。
   // 任一参数为 0 时补偿量恒为 0，拼版页位与原结果完全一致。
   const creepEnabled = paperThickness > 0 && maxCompensation > 0;
-  const sheetCompensationMm = [];
-  for (let i = 0; i < sheetsPerSignature; i++) {
-    const creep = creepEnabled ? Math.min(i * paperThickness * 2, maxCompensation) : 0;
-    sheetCompensationMm.push(round4(creep));
+  function compensationFor(sheetCount) {
+    const arr = [];
+    for (let i = 0; i < sheetCount; i++) {
+      const creep = creepEnabled ? Math.min(i * paperThickness * 2, maxCompensation) : 0;
+      arr.push(round4(creep));
+    }
+    return arr;
   }
+  // 顶层数组按每帖张数上限给出（固定分帖时即各帖补偿量；各帖同序号纸张补偿量相同）。
+  const sheetCompensationMm = compensationFor(sheetsPerSignature);
   // 左装订：左页位为正、右页位为负；右装订：符号整体反转。
   const sideSign = binding === 'left' ? 1 : -1;
 
   const signatures = [];
+  let pageCursor = 1;
   for (let s = 0; s < signatureCount; s++) {
-    const start = s * pagesPerSignature + 1;
-    const end = start + pagesPerSignature - 1;
+    const actualSheetCount = sheetCounts[s];
+    const pagesInSignature = actualSheetCount * 4;
+    const start = pageCursor;
+    const end = start + pagesInSignature - 1;
+    pageCursor += pagesInSignature;
+    const sigCompensationMm = compensationFor(actualSheetCount);
+    let sigBlankPages = 0;
     const sheets = [];
 
-    for (let i = 0; i < sheetsPerSignature; i++) {
+    for (let i = 0; i < actualSheetCount; i++) {
       const lowFront = start + 2 * i; // 小号页（正面）
       const lowBack = lowFront + 1;   // 小号页之背
       const highFront = end - 2 * i;  // 大号页（正面）
@@ -158,9 +201,12 @@ function computeImposition(input) {
         left: makeSlot(backLeft, totalPages),
         right: makeSlot(backRight, totalPages),
       };
+      [front.left, front.right, back.left, back.right].forEach((slot) => {
+        if (slot.blank) sigBlankPages += 1;
+      });
 
       // 爬移偏移量：正反面同方向（由装订侧决定），空白页同样保留偏移。
-      const creep = sheetCompensationMm[i];
+      const creep = sigCompensationMm[i];
       front.left.offsetMm = round4(sideSign * creep);
       front.right.offsetMm = round4(-sideSign * creep);
       back.left.offsetMm = round4(sideSign * creep);
@@ -173,18 +219,28 @@ function computeImposition(input) {
       sheets.push({ index: i + 1, front, back });
     }
 
-    signatures.push({ index: s + 1, pageStart: start, pageEnd: end, sheets });
+    signatures.push({
+      index: s + 1,
+      pageStart: start,
+      pageEnd: end,
+      actualSheetCount,
+      actualPageCount: pagesInSignature,
+      blankPages: sigBlankPages,
+      sheetCompensationMm: sigCompensationMm,
+      sheets,
+    });
   }
 
   const result = {
     meta: {
       app: 'saddle-stitch-imposition',
-      version: '1.2.0',
+      version: '1.3.0',
       generatedAt: new Date().toISOString(),
     },
     input: {
       totalPages,
       sheetsPerSignature,
+      balancedSplit,
       binding,
       flip,
       paperThickness,
@@ -196,7 +252,7 @@ function computeImposition(input) {
       bleedMm: fit.bleedMm,
       safetyMm: fit.safetyMm,
     },
-    pagesPerSignature,
+    pagesPerSignature: maxPagesPerSignature,
     signatureCount,
     paddedPages,
     blankPages: paddedPages - totalPages,
@@ -204,9 +260,22 @@ function computeImposition(input) {
       paperThickness,
       maxCompensation,
       enabled: creepEnabled,
-      // 每帖由外向内第 i 张纸的补偿量（mm），各帖相同
+      // 按每帖张数上限由外向内第 i 张纸的补偿量（mm）；
+      // 固定分帖时与各帖补偿量一致；均衡分帖请以各帖 sheetCompensationMm 为准
       sheetCompensationMm,
     },
+    balanced: balancedSplit
+      ? {
+          enabled: true,
+          maxSheetsPerSignature: sheetsPerSignature,
+          totalSheets: sheetCounts.reduce((sum, n) => sum + n, 0),
+          fixedSignatureCount,
+          fixedPaddedPages,
+          fixedBlankPages: fixedPaddedPages - totalPages,
+          savedBlankPages: fixedPaddedPages - paddedPages,
+          actualSheetCounts: sheetCounts.slice(),
+        }
+      : { enabled: false },
     signatures,
   };
 

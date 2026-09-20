@@ -35,6 +35,7 @@ form.addEventListener('submit', async (event) => {
   const payload = {
     totalPages: Number(document.getElementById('totalPages').value),
     sheetsPerSignature: Number(document.getElementById('sheetsPerSignature').value),
+    balancedSplit: document.getElementById('balancedSplit').checked,
     binding: document.getElementById('binding').value,
     flip: document.getElementById('flip').value,
     paperThickness: Number(document.getElementById('paperThickness').value),
@@ -117,18 +118,43 @@ function renderAll() {
 
 function renderSummary() {
   const r = state.result;
+  const balanced = r.balanced && r.balanced.enabled;
+  const modeText = balanced
+    ? `均衡分帖：上限 ${r.input.sheetsPerSignature} 张/帖`
+    : `固定分帖：每帖 ${r.input.sheetsPerSignature} 张（${r.pagesPerSignature} 页）`;
   const chips = [
     { text: `成品 ${r.input.totalPages} 页` },
-    { text: `每帖 ${r.input.sheetsPerSignature} 张（${r.pagesPerSignature} 页）` },
+    { text: modeText, cls: balanced ? 'balanced' : '' },
     { text: `共 ${r.signatureCount} 帖` },
     { text: `补白后 ${r.paddedPages} 页` },
     { text: r.blankPages > 0 ? `自动补空白页 ${r.blankPages} 页` : '无需补白', cls: r.blankPages > 0 ? 'warn' : '' },
     { text: BINDING_TEXT[r.input.binding] },
     { text: FLIP_TEXT[r.input.flip] },
+  ];
+  if (balanced) {
+    const counts = r.balanced.actualSheetCounts;
+    const min = Math.min(...counts);
+    const max = Math.max(...counts);
+    chips.push({
+      text: min === max
+        ? `各帖实际均为 ${min} 张`
+        : `各帖实际 ${min}～${max} 张（[${counts.join(', ')}]）`,
+      cls: 'balanced',
+    });
+    if (r.balanced.savedBlankPages > 0) {
+      chips.push({
+        text: `较固定分帖（${r.balanced.fixedPaddedPages} 页）节省空白页 ${r.balanced.savedBlankPages} 页`,
+        cls: 'saved',
+      });
+    } else {
+      chips.push({ text: '本页数下与固定分帖用纸相同', cls: 'balanced' });
+    }
+  }
+  chips.push(
     r.creep.enabled
       ? { text: `爬移补偿：纸厚 ${formatMm(r.input.paperThickness)} mm · 上限 ${formatMm(r.input.maxCompensation)} mm`, cls: 'creep' }
       : { text: '爬移补偿：未启用', cls: 'creep-off' },
-  ];
+  );
   if (r.fit && r.fit.enabled) {
     chips.push(
       r.fit.ok
@@ -169,7 +195,7 @@ function renderSheetNav() {
     const sheet = sig.sheets[pos.shi];
     const opt = document.createElement('option');
     opt.value = String(i);
-    opt.textContent = `第 ${sig.index} 帖 · 第 ${sheet.index} 张${fitOn && sheetHasFitFail(sheet) ? ' ⚠' : ''}`;
+    opt.textContent = `第 ${sig.index} 帖（${sig.actualSheetCount} 张） · 第 ${sheet.index} 张${fitOn && sheetHasFitFail(sheet) ? ' ⚠' : ''}`;
     sheetSelect.appendChild(opt);
   });
   sheetSelect.value = String(state.idx);
@@ -199,7 +225,13 @@ function renderTable() {
         { name: '背面', side: sheet.back, note: flipNote },
       ].forEach(({ name, side, note }) => {
         const tr = document.createElement('tr');
-        [String(sig.index), String(sheet.index), name].forEach((t) => {
+        // 帖号单元格：均衡分帖下追加本帖实际张数（仅在每帖首行重复标注）
+        const tdSig = document.createElement('td');
+        tdSig.textContent = name === '正面'
+          ? `${sig.index}${sig.actualSheetCount !== r.input.sheetsPerSignature ? `（${sig.actualSheetCount} 张）` : ''}`
+          : '';
+        tr.appendChild(tdSig);
+        [String(sheet.index), name].forEach((t) => {
           const td = document.createElement('td');
           td.textContent = t;
           tr.appendChild(td);
@@ -301,16 +333,20 @@ function draw() {
   ctx.fillStyle = '#16233b';
   ctx.font = 'bold 22px system-ui, sans-serif';
   ctx.fillText(
-    `第 ${sig.index} / ${r.signatureCount} 帖 · 第 ${sheet.index} / ${sig.sheets.length} 张（本帖页码 ${sig.pageStart}–${sig.pageEnd}）`,
+    `第 ${sig.index} / ${r.signatureCount} 帖 · 第 ${sheet.index} / ${sig.sheets.length} 张（本帖实际 ${sig.actualSheetCount} 张 · 页码 ${sig.pageStart}–${sig.pageEnd}）`,
     40, 44
   );
   ctx.font = '14px system-ui, sans-serif';
   ctx.fillStyle = '#5a6b85';
+  const sigCreepArr = sig.sheetCompensationMm || r.creep.sheetCompensationMm;
   const creepSubtitle = r.creep.enabled
-    ? `　爬移补偿：纸厚 ${formatMm(r.input.paperThickness)} mm · 上限 ${formatMm(r.input.maxCompensation)} mm · 本张补偿 ${formatMm(r.creep.sheetCompensationMm[sheet.index - 1])} mm`
+    ? `　爬移补偿：纸厚 ${formatMm(r.input.paperThickness)} mm · 上限 ${formatMm(r.input.maxCompensation)} mm · 本张补偿 ${formatMm(sigCreepArr[sheet.index - 1])} mm`
     : '　爬移补偿未启用';
+  const modeSubtitle = r.balanced && r.balanced.enabled
+    ? `　均衡分帖（各帖实际张数差 ≤ 1）${r.balanced.savedBlankPages > 0 ? ` · 较固定分帖节省 ${r.balanced.savedBlankPages} 个空白页` : ''}`
+    : '　固定分帖';
   ctx.fillText(
-    `装订：${BINDING_TEXT[binding]}　双面翻转：${FLIP_TEXT[flip]}　成品 ${r.input.totalPages} 页 · 补白 ${r.blankPages} 页 · 共 ${r.paddedPages} 页${creepSubtitle}`,
+    `装订：${BINDING_TEXT[binding]}　双面翻转：${FLIP_TEXT[flip]}　成品 ${r.input.totalPages} 页 · 补白 ${r.blankPages} 页 · 共 ${r.paddedPages} 页${creepSubtitle}${modeSubtitle}`,
     40, 70
   );
   if (fitOn) {
@@ -346,8 +382,11 @@ function draw() {
     backRect.x + sheetW / 2, top - 16
   );
 
-  // 爬移像素比例：示意性放大，保证最大补偿量在页位内至少留 18px 边距且不超过页位宽 35%
-  const maxCreepMm = r.creep.enabled ? Math.max(...r.creep.sheetCompensationMm) : 0;
+  // 爬移像素比例：示意性放大，保证最大补偿量在页位内至少留 18px 边距且不超过页位宽 35%。
+  // 均衡分帖下各帖按实际层数独立计算，故取所有帖补偿量的最大值。
+  const perSigCreep = r.signatures.map((sg) => sg.sheetCompensationMm || r.creep.sheetCompensationMm);
+  const allCreepVals = perSigCreep.flat();
+  const maxCreepMm = r.creep.enabled && allCreepVals.length ? Math.max(...allCreepVals) : 0;
   const creepPxPerMm = maxCreepMm > 0
     ? Math.max(1, Math.min(30, (sheetW / 2 * 0.35 - 18) / maxCreepMm))
     : 0;
@@ -706,6 +745,12 @@ function buildNotes(input, creep, fit, violations) {
     },
     { text: '背面每个页位标注了它物理上位于哪一正面页之背；沿折线对折并配帖装订后，页码首尾相接，阅读顺序连续。' },
   ];
+  if (input.balancedSplit) {
+    lines.push({
+      text: '均衡分帖：以每帖张数为上限取最少帖数，整本所需纸张在各帖间均匀分配，各帖实际张数差不超过 1，各帖按自身页数连续编号，空白页只出现在末帖末尾；爬移补偿按各帖实际层数独立重算。',
+      color: '#0b7285',
+    });
+  }
   if (creep && creep.enabled) {
     lines.push(
       {

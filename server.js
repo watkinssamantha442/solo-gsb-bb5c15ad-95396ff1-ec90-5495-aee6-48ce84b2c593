@@ -17,7 +17,8 @@ app.get('/api/health', (req, res) => {
  * 拼版计算接口。
  * 请求体：{
  *   totalPages, sheetsPerSignature, binding: 'left'|'right', flip: 'long'|'short',
- *   paperThickness?, maxCompensation?   // 可选，纸张厚度与爬移最大补偿量（mm，缺省/为 0 不补偿）
+ *   paperThickness?, maxCompensation?,                       // 可选，纸张厚度与爬移最大补偿量（mm，缺省/为 0 不补偿）
+ *   balancedSplit?                                           // 可选，true = 均衡分帖（缺省 false = 固定分帖）
  * }
  * 响应：拼版清单 JSON（与前端「导出拼版清单 JSON」内容一致）
  */

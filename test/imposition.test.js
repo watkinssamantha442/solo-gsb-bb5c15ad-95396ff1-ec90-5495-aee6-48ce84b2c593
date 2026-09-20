@@ -242,7 +242,9 @@ test('任一参数为 0 时偏移全部归零', () => {
 });
 
 test('爬移参数不改变页码拼版结果（启用前后页码布局一致）', () => {
-  const strip = (r) => JSON.parse(JSON.stringify(r.signatures, (k, v) => (k === 'offsetMm' ? undefined : v)));
+  const strip = (r) => JSON.parse(
+    JSON.stringify(r.signatures, (k, v) => (k === 'offsetMm' || k === 'sheetCompensationMm' ? undefined : v))
+  );
   const without = computeImposition({ totalPages: 12, sheetsPerSignature: 3, binding: 'right', flip: 'long' });
   const withCreep = computeImposition({ totalPages: 12, sheetsPerSignature: 3, binding: 'right', flip: 'long', paperThickness: 0.12, maxCompensation: 0.3 });
   assert.deepEqual(strip(withCreep), strip(without));
@@ -261,4 +263,241 @@ test('爬移参数校验', () => {
     () => computeImposition({ totalPages: 8, sheetsPerSignature: 1, binding: 'left', flip: 'short', paperThickness: 'abc' }),
     /纸张厚度/
   );
+});
+
+/* ------------------------------ 均衡分帖 ------------------------------ */
+
+/** 收集拼版结果中的全部页位（每张纸正反 × 左右）。 */
+function allSlotsOf(r) {
+  const slots = [];
+  r.signatures.forEach((sig) => {
+    sig.sheets.forEach((sheet) => {
+      slots.push(sheet.front.left, sheet.front.right, sheet.back.left, sheet.back.right);
+    });
+  });
+  return slots;
+}
+
+test('缺省时固定分帖：balanced.enabled=false，结果与旧版本一致', () => {
+  const r = computeImposition({ totalPages: 10, sheetsPerSignature: 2, binding: 'left', flip: 'short' });
+  assert.equal(r.input.balancedSplit, false);
+  assert.deepEqual(r.balanced, { enabled: false });
+  assert.equal(r.signatureCount, 2);
+  assert.equal(r.paddedPages, 16);
+  assert.equal(r.blankPages, 6);
+  // 各帖仍为固定 2 张
+  r.signatures.forEach((sig) => {
+    assert.equal(sig.actualSheetCount, 2);
+    assert.equal(sig.actualPageCount, 8);
+  });
+});
+
+test('均衡分帖：17 页、上限 2 张 -> [2,2,1]，各帖张数差不超过 1', () => {
+  const r = computeImposition({ totalPages: 17, sheetsPerSignature: 2, binding: 'left', flip: 'short', balancedSplit: true });
+  assert.equal(r.balanced.enabled, true);
+  assert.equal(r.signatureCount, 3);
+  assert.deepEqual(r.balanced.actualSheetCounts, [2, 2, 1]);
+  r.signatures.forEach((sig, i) => {
+    assert.equal(sig.actualSheetCount, [2, 2, 1][i]);
+    assert.equal(sig.actualPageCount, sig.actualSheetCount * 4);
+    assert.equal(sig.sheets.length, sig.actualSheetCount);
+  });
+  assert.equal(r.paddedPages, 20);
+  assert.equal(r.blankPages, 3);
+  // 相对固定分帖（3 帖 × 8 = 24 页）少补 4 个空白页
+  assert.equal(r.balanced.fixedPaddedPages, 24);
+  assert.equal(r.balanced.fixedBlankPages, 7);
+  assert.equal(r.balanced.savedBlankPages, 4);
+  assert.equal(r.balanced.totalSheets, 5);
+  // 各帖页码连续
+  assert.deepEqual([r.signatures[0].pageStart, r.signatures[0].pageEnd], [1, 8]);
+  assert.deepEqual([r.signatures[1].pageStart, r.signatures[1].pageEnd], [9, 16]);
+  assert.deepEqual([r.signatures[2].pageStart, r.signatures[2].pageEnd], [17, 20]);
+});
+
+test('均衡分帖：末帖按自身页数编号，空白页只出现在末帖（页码最大的页位）', () => {
+  const r = computeImposition({ totalPages: 17, sheetsPerSignature: 2, binding: 'left', flip: 'short', balancedSplit: true });
+  // 末帖仅 1 张（17–20）：左装订短边翻转，第 17 页在正面右页位，
+  // 其物理正后方（背面左页位）及其余大号页位 18/19/20 均为空白
+  const last = r.signatures[2];
+  assert.equal(last.sheets.length, 1);
+  const sheet = last.sheets[0];
+  assert.equal(sheet.front.left.blank, true);   // 20
+  assert.equal(sheet.front.right.page, 17);
+  assert.equal(sheet.back.left.blank, true);    // 17 之背
+  assert.equal(sheet.back.left.backOf, 17);
+  assert.equal(sheet.back.right.blank, true);   // 18
+  assert.equal(last.blankPages, 3);
+  // 前两帖无空白页
+  assert.equal(r.signatures[0].blankPages, 0);
+  assert.equal(r.signatures[1].blankPages, 0);
+  // 整本：非空白页恰好为 1..17 各一次，空白页全在末帖
+  const printed = allSlotsOf(r)
+    .filter((s) => !s.blank)
+    .map((s) => s.page)
+    .sort((a, b) => a - b);
+  assert.deepEqual(printed, Array.from({ length: 17 }, (_, i) => i + 1));
+  r.signatures.slice(0, -1).forEach((sig) => {
+    allSlotsOf({ signatures: [sig] }).forEach((s) => assert.equal(s.blank, false));
+  });
+});
+
+test('均衡分帖：10 页、上限 2 张 -> [2,1]，节省 4 个空白页', () => {
+  const r = computeImposition({ totalPages: 10, sheetsPerSignature: 2, binding: 'left', flip: 'short', balancedSplit: true });
+  assert.deepEqual(r.balanced.actualSheetCounts, [2, 1]);
+  assert.equal(r.paddedPages, 12);
+  assert.equal(r.blankPages, 2);
+  assert.equal(r.balanced.fixedPaddedPages, 16);
+  assert.equal(r.balanced.savedBlankPages, 4);
+  assert.deepEqual([r.signatures[0].pageStart, r.signatures[0].pageEnd], [1, 8]);
+  assert.deepEqual([r.signatures[1].pageStart, r.signatures[1].pageEnd], [9, 12]);
+  // 末帖 1 张（9–12）：左装订短边翻转，正面 [空白(12), 9]，背面 [10, 空白(11)]
+  const sheet = r.signatures[1].sheets[0];
+  assert.equal(sheet.front.left.blank, true);
+  assert.equal(sheet.front.right.page, 9);
+  assert.equal(sheet.back.left.page, 10);
+  assert.equal(sheet.back.right.blank, true);
+});
+
+test('均衡分帖：30 页、上限 3 张 -> [3,3,2]', () => {
+  const r = computeImposition({ totalPages: 30, sheetsPerSignature: 3, binding: 'left', flip: 'short', balancedSplit: true });
+  assert.deepEqual(r.balanced.actualSheetCounts, [3, 3, 2]);
+  assert.equal(r.paddedPages, 32);
+  assert.equal(r.blankPages, 2);
+  assert.equal(r.balanced.savedBlankPages, 4); // 固定分帖 3 × 12 = 36
+  assert.deepEqual(
+    r.signatures.map((sig) => [sig.pageStart, sig.pageEnd]),
+    [[1, 12], [13, 24], [25, 32]]
+  );
+});
+
+test('均衡分帖：整本只需 1 帖时结果与固定分帖相同', () => {
+  const r = computeImposition({ totalPages: 7, sheetsPerSignature: 2, binding: 'left', flip: 'short', balancedSplit: true });
+  assert.equal(r.signatureCount, 1);
+  assert.deepEqual(r.balanced.actualSheetCounts, [2]);
+  assert.equal(r.paddedPages, 8);
+  assert.equal(r.blankPages, 1);
+  assert.equal(r.balanced.savedBlankPages, 0);
+  const sheet = r.signatures[0].sheets[0];
+  assert.equal(sheet.front.left.blank, true);
+  assert.equal(sheet.front.right.page, 1);
+});
+
+test('均衡分帖：页数恰为整帖上限倍数时与固定分帖页码布局一致', () => {
+  const strip = (r) => JSON.parse(
+    JSON.stringify(r.signatures, (k, v) => (
+      k === 'offsetMm' || k === 'sheetCompensationMm' || k === 'actualSheetCount'
+        || k === 'actualPageCount' || k === 'blankPages'
+        ? undefined
+        : v
+    ))
+  );
+  const fixed = computeImposition({ totalPages: 16, sheetsPerSignature: 2, binding: 'right', flip: 'long' });
+  const balanced = computeImposition({ totalPages: 16, sheetsPerSignature: 2, binding: 'right', flip: 'long', balancedSplit: true });
+  assert.deepEqual(balanced.balanced.actualSheetCounts, [2, 2]);
+  assert.equal(balanced.balanced.savedBlankPages, 0);
+  assert.deepEqual(strip(balanced), strip(fixed));
+});
+
+test('均衡分帖：装订方向与翻转方式仍决定页位（右装订 + 长边翻转）', () => {
+  const r = computeImposition({ totalPages: 10, sheetsPerSignature: 2, binding: 'right', flip: 'long', balancedSplit: true });
+  // 首帖 1–8：右装订正面 [1, 8]；长边翻转背面左右不变 -> [2, 7]
+  const s1 = r.signatures[0].sheets[0];
+  assert.deepEqual([s1.front.left.page, s1.front.right.page], [1, 8]);
+  assert.deepEqual([s1.back.left.page, s1.back.right.page], [2, 7]);
+  // 末帖 9–12（1 张）：右装订正面 [9, 空白(12)]；长边翻转背面左右不变 -> [10, 空白(11)]
+  const last = r.signatures[1].sheets[0];
+  assert.equal(last.front.left.page, 9);
+  assert.equal(last.front.right.blank, true);
+  assert.equal(last.back.left.page, 10);
+  assert.equal(last.back.right.blank, true);
+});
+
+test('均衡分帖：爬移补偿按各帖实际层数重算（[3,3,2] -> 末帖只有 0/0.2 两层）', () => {
+  const r = computeImposition({
+    totalPages: 30, sheetsPerSignature: 3, binding: 'left', flip: 'short',
+    paperThickness: 0.1, maxCompensation: 5, balancedSplit: true,
+  });
+  assert.equal(r.creep.enabled, true);
+  // 顶层数组仍按上限给出
+  assert.deepEqual(r.creep.sheetCompensationMm, [0, 0.2, 0.4]);
+  // 各帖按实际张数给出补偿序列
+  assert.deepEqual(r.signatures[0].sheetCompensationMm, [0, 0.2, 0.4]);
+  assert.deepEqual(r.signatures[1].sheetCompensationMm, [0, 0.2, 0.4]);
+  assert.deepEqual(r.signatures[2].sheetCompensationMm, [0, 0.2]);
+  // 末帖第 2 张（最内层，i=1）：±0.2
+  const inner = r.signatures[2].sheets[1];
+  assert.equal(inner.front.left.offsetMm, 0.2);
+  assert.equal(inner.front.right.offsetMm, -0.2);
+  assert.equal(inner.back.left.offsetMm, 0.2);
+  assert.equal(inner.back.right.offsetMm, -0.2);
+  // 末帖空白页（28、29、32）也带对应偏移：末帖第 1 张 i=0 补偿为 0
+  const outer = r.signatures[2].sheets[0];
+  assert.equal(outer.front.left.blank, true); // 第 32 页
+  assert.equal(outer.front.left.offsetMm, 0);
+});
+
+test('均衡分帖：不启用爬移时所有页位 offsetMm 为 0', () => {
+  const r = computeImposition({ totalPages: 30, sheetsPerSignature: 3, binding: 'left', flip: 'short', balancedSplit: true });
+  assert.equal(r.creep.enabled, false);
+  r.signatures.forEach((sig) => {
+    assert.deepEqual(sig.sheetCompensationMm, Array(sig.actualSheetCount).fill(0));
+  });
+  allSlotsOf(r).forEach((s) => assert.equal(s.offsetMm, 0));
+});
+
+test('均衡分帖：适配检查按实际纸张总数统计页位（32 页位含空白）', () => {
+  const r = computeImposition({
+    totalPages: 30, sheetsPerSignature: 3, binding: 'left', flip: 'short', balancedSplit: true,
+    paperWidth: 440, paperHeight: 310, pageWidth: 210, pageHeight: 297, bleedMm: 3, safetyMm: 5,
+  });
+  assert.equal(r.fit.enabled, true);
+  assert.equal(r.fit.totalSlots, 32);
+  allSlotsOf(r).forEach((s) => {
+    assert.ok(s.fit);
+    assert.equal(s.fit.ok, true);
+  });
+});
+
+test('均衡分帖：穷举页数与上限，实际张数不超限、差不超过 1、空白只在末帖', () => {
+  for (let totalPages = 1; totalPages <= 130; totalPages++) {
+    for (let maxSheets = 1; maxSheets <= 6; maxSheets++) {
+      const r = computeImposition({ totalPages, sheetsPerSignature: maxSheets, binding: 'left', flip: 'short', balancedSplit: true });
+      const counts = r.balanced.actualSheetCounts;
+      assert.equal(counts.length, r.signatureCount);
+      counts.forEach((n) => assert.ok(n >= 1 && n <= maxSheets));
+      const spread = Math.max(...counts) - Math.min(...counts);
+      assert.ok(spread <= 1, `页数 ${totalPages} 上限 ${maxSheets}: 张数 spread=${spread}`);
+      assert.equal(r.paddedPages, counts.reduce((a, b) => a + b * 4, 0));
+      assert.equal(r.blankPages, r.paddedPages - totalPages);
+      assert.equal(r.balanced.savedBlankPages, r.balanced.fixedPaddedPages - r.paddedPages);
+      // 非空白页恰好覆盖 1..totalPages
+      const printed = allSlotsOf(r).filter((s) => !s.blank).map((s) => s.page).sort((a, b) => a - b);
+      assert.deepEqual(printed, Array.from({ length: totalPages }, (_, i) => i + 1));
+      // 空白页只在末帖
+      r.signatures.slice(0, -1).forEach((sig) => assert.equal(sig.blankPages, 0));
+      assert.equal(r.signatures[r.signatures.length - 1].blankPages, r.blankPages);
+    }
+  }
+});
+
+test('均衡分帖开关必须为布尔值', () => {
+  assert.throws(
+    () => computeImposition({ totalPages: 8, sheetsPerSignature: 2, binding: 'left', flip: 'short', balancedSplit: 'yes' }),
+    /均衡分帖/
+  );
+  assert.throws(
+    () => computeImposition({ totalPages: 8, sheetsPerSignature: 2, binding: 'left', flip: 'short', balancedSplit: 1 }),
+    /均衡分帖/
+  );
+});
+
+test('显式 balancedSplit=false 与缺省结果一致', () => {
+  const common = { totalPages: 23, sheetsPerSignature: 3, binding: 'left', flip: 'long', paperThickness: 0.1, maxCompensation: 1 };
+  const a = computeImposition(common);
+  const b = computeImposition({ ...common, balancedSplit: false });
+  // 生成时间与 balanced 元数据外完全一致
+  delete a.meta.generatedAt;
+  delete b.meta.generatedAt;
+  assert.deepEqual(b, a);
 });
